@@ -15,7 +15,7 @@
         npm-install = "npm install";
       };
       onStart = {
-        npm-dev = "npm run dev";
+        npm-start = "npm start";
       };
     };
   };
