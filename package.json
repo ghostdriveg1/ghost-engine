@@ -21,11 +21,16 @@
   },
   "homepage": "https://github.com/ghostdriveg1/ghost-engine#readme",
   "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "busboy": "^1.6.0",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "multer": "^2.0.2",
+    "simple-git": "^3.30.0"
   },
   "devDependencies": {
+    "@types/busboy": "^1.5.4",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.10",
