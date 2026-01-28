@@ -48,7 +48,17 @@ Create a `.env` file (copy from `.env.example`):
 ```env
 PORT=3001
 NODE_ENV=production
+
+# GitHub repository configuration for test endpoints
+GITHUB_OWNER=your-username
+GITHUB_REPO=ghost-drive-index
 ```
+
+**Required Variables:**
+- `PORT`: Server port (default: 3001)
+- `NODE_ENV`: Environment mode (production/development)
+- `GITHUB_OWNER`: Your GitHub username (required for test endpoints)
+- `GITHUB_REPO`: Index repository name (required for test endpoints, typically `ghost-drive-index`)
 
 **Note:** GitHub tokens and encryption passwords are NOT stored in environment variables. They're passed via HTTP headers from the client (zero-knowledge architecture).
 
