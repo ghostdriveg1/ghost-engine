@@ -28,6 +28,7 @@ The serverless compute engine that handles all file processing operations for Gh
 
 3. **Wait for initialization** (2-3 minutes)
    - Dependencies will install automatically
+   - TypeScript will compile automatically
    - Server will start automatically on port 3001
 
 4. **Copy your Codespace URL**
@@ -36,7 +37,7 @@ The serverless compute engine that handles all file processing operations for Gh
 
 5. **Verify it's running**
    - Visit `https://your-codespace-url/health`
-   - You should see: `{"status":"ok","timestamp":"..."}`
+   - You should see: `{"status":"ok","timestamp":"...","version":"1.0.0"}`
 
 ## ⚙️ Configuration
 
@@ -81,22 +82,29 @@ npm start
 
 ## 📡 API Endpoints
 
-### Health Check
+### Production Endpoints
+
+#### Health Check
 ```
 GET /health
-Response: { "status": "ok", "timestamp": "..." }
+Response: {
+  "status": "ok",
+  "timestamp": "2026-01-28T...",
+  "version": "1.0.0"
+}
 ```
 
-### Upload File
+#### Upload File
 ```
 POST /upload
 Headers:
   - x-ghost-token: GitHub Personal Access Token
   - x-ghost-pass: Encryption password
 Body: multipart/form-data with file
+Response: File metadata with upload confirmation
 ```
 
-### Download File
+#### Download File
 ```
 GET /download/:fileId
 Headers:
@@ -105,39 +113,39 @@ Headers:
 Response: Streaming file download
 ```
 
-### Get File Index
-```
-GET /index
-Headers:
-  - x-ghost-token: GitHub Personal Access Token
-Response: Array of file metadata
-```
+### Integration Test Endpoints
 
-### Get Thumbnail
+These endpoints are available for testing core functionality:
+
+#### Fetch Encrypted Index
 ```
-GET /thumbnail/:fileId
+GET /test/fetch-index
 Headers:
   - x-ghost-token: GitHub Personal Access Token
   - x-ghost-pass: Encryption password
-Response: Image thumbnail
+Response: Encrypted index data with SHA
 ```
 
-### Delete File
+#### Update Index with Optimistic Locking
 ```
-DELETE /delete/:fileId
+POST /test/update-index
 Headers:
   - x-ghost-token: GitHub Personal Access Token
-Response: { "success": true }
+  - x-ghost-pass: Encryption password
+Body: { "fileName": "test.txt", "fileSize": 1024 }
+Response: Success confirmation with file count
 ```
 
-### Create Shard
+#### Upload Test Chunks
 ```
-POST /shard/create
+POST /test/upload-chunks
 Headers:
   - x-ghost-token: GitHub Personal Access Token
-Body: Shard data
-Response: { "success": true, "shardId": "..." }
+Body: { "shardRepo": "ghost-drive-shard-001", "chunkCount": 3 }
+Response: Batch upload confirmation
 ```
+
+**Note:** Additional production endpoints (index, thumbnail, delete, shard) are planned but not yet implemented.
 
 ## 📦 Tech Stack
 
@@ -147,6 +155,20 @@ Response: { "success": true, "shardId": "..." }
 - **[Node.js crypto](https://nodejs.org/api/crypto.html)** - Built-in encryption/decryption
 - **[zlib](https://nodejs.org/api/zlib.html)** - Built-in compression/decompression
 - **TypeScript** - Type-safe development
+
+## 🔧 Auto-Start Behavior
+
+When deploying to GitHub Codespaces, the devcontainer configuration:
+
+1. **On Creation**: Runs `npm install && npm run build`
+   - Installs all dependencies
+   - Compiles TypeScript to JavaScript in `dist/` directory
+
+2. **On Start**: Runs `npm start`
+   - Starts the Express server on port 3001
+   - Requires `dist/index.js` to exist (created by build step)
+
+3. **Port Forwarding**: Automatically forwards port 3001 with notifications
 
 ## 📄 License
 
