@@ -6,6 +6,7 @@ import { generateIV, createEncryptStream } from '../crypto/encryption';
 import { Chunker } from '../utils/chunker';
 import { GitClient } from '../github/gitClient';
 import { IndexManager } from '../github/indexManager';
+import { createGitHubClient } from '../github/client';
 import { ShardManager } from './shardManager';
 import { TokenRotator } from './tokenRotator';
 import { FileMetadata } from '../github/types';
@@ -126,6 +127,34 @@ export class UploadProcessor {
             // Get auth tag from encryption stream
             const authTag = encryptStream.getAuthTag();
 
+            // Create chunk manifest object
+            const chunkManifest = {
+                fileId,
+                chunks: chunkRefs.map((ref) => ({
+                    shardRepo,
+                    blobSHA: ref.blobSHA,
+                    size: ref.size,
+                    authTag: authTag.toString('hex'),
+                })),
+            };
+
+            // Write detached manifest to Index Repo
+            const manifestPath = `manifests/${fileId}.json`;
+            const octokit = createGitHubClient(currentToken);
+
+            try {
+                await octokit.repos.createOrUpdateFileContents({
+                    owner: this.owner,
+                    repo: process.env.GITHUB_REPO || 'ghost-drive-index',
+                    path: manifestPath,
+                    message: `Add manifest for ${fileId}`,
+                    content: Buffer.from(JSON.stringify(chunkManifest, null, 2)).toString('base64'),
+                });
+            } catch (error: any) {
+                console.error('Failed to write manifest:', error.message);
+                throw new Error(`Failed to write manifest: ${error.message}`);
+            }
+
             // Update index with file metadata
             const indexManager = new IndexManager(
                 currentToken,
@@ -143,15 +172,7 @@ export class UploadProcessor {
                 size: totalSize,
                 mimeType: 'application/octet-stream',
                 uploadedAt: new Date().toISOString(),
-                manifest: {
-                    fileId,
-                    chunks: chunkRefs.map((ref) => ({
-                        shardRepo,
-                        blobSHA: ref.blobSHA, // Real blob SHA captured during processing
-                        size: ref.size,
-                        authTag: authTag.toString('hex'),
-                    })),
-                },
+                manifest: manifestPath, // Store path to detached manifest
                 encryptionIV: iv.toString('hex'),
             };
 

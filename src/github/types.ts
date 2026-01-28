@@ -5,7 +5,7 @@ export interface FileMetadata {
     size: number;
     mimeType: string;
     uploadedAt: string;
-    manifest: ChunkManifest;
+    manifest: string; // Path to detached manifest file (e.g., "manifests/{uuid}.json")
     thumbnail?: string;
     encryptionIV: string;
     compressionRatio?: number;

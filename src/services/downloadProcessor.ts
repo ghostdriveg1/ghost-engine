@@ -10,15 +10,19 @@ import { ChunkManifest, ChunkReference } from '../github/types';
 
 /**
  * DownloadProcessor - Orchestrate streaming download pipeline
- * Fetch chunks in parallel → Decrypt → Decompress → Stream to client
+ * Fetch chunks incrementally → Decrypt → Decompress → Stream to client
  */
 export class DownloadProcessor {
     private githubToken: string;
     private encryptionPass: string;
+    private owner: string;
+    private indexRepo: string;
 
-    constructor(githubToken: string, encryptionPass: string) {
+    constructor(githubToken: string, encryptionPass: string, owner: string, indexRepo: string) {
         this.githubToken = githubToken;
         this.encryptionPass = encryptionPass;
+        this.owner = owner;
+        this.indexRepo = indexRepo;
     }
 
     /**
@@ -30,8 +34,8 @@ export class DownloadProcessor {
         // Fetch and decrypt index
         const indexManager = new IndexManager(
             this.githubToken,
-            'ghostdriveg1',
-            process.env.GITHUB_REPO || 'ghost-drive-index',
+            this.owner,
+            this.indexRepo,
             this.encryptionPass
         );
 
@@ -44,7 +48,7 @@ export class DownloadProcessor {
         }
 
         // Load detached manifest
-        const manifest = await this.loadManifest(file.manifest as any);
+        const manifest = await this.loadManifest(file.manifest);
 
         // Derive encryption key
         const key = await deriveKey(this.encryptionPass, 'ghost-drive-salt');
@@ -53,22 +57,19 @@ export class DownloadProcessor {
         // Get auth tag from first chunk (assuming whole-file encryption)
         const authTag = Buffer.from(manifest.chunks[0].authTag, 'hex');
 
-        // Fetch chunks in parallel (batches of 5)
-        const chunkBuffers = await this.fetchChunksParallel(manifest.chunks, 5);
-
-        // Create readable stream from chunk buffers
-        const chunkStream = Readable.from(chunkBuffers);
-
-        // Setup streaming pipeline: chunks → decrypt → gunzip → response
-        const decryptStream = createDecryptStream(key, iv, authTag);
-        const gunzipStream = zlib.createGunzip();
-
         // Set response headers
         (res as any).setHeader('Content-Type', file.mimeType || 'application/octet-stream');
         (res as any).setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
 
-        // Pipe the streaming download
-        chunkStream.pipe(decryptStream).pipe(gunzipStream).pipe(res as any);
+        // Create decrypt and gunzip streams
+        const decryptStream = createDecryptStream(key, iv, authTag);
+        const gunzipStream = zlib.createGunzip();
+
+        // Pipe decrypt → gunzip → response
+        decryptStream.pipe(gunzipStream).pipe(res as any);
+
+        // Stream chunks incrementally to decrypt stream
+        await this.streamChunksIncremental(manifest.chunks, decryptStream, 5);
     }
 
     /**
@@ -80,8 +81,8 @@ export class DownloadProcessor {
 
         try {
             const { data } = await octokit.repos.getContent({
-                owner: 'ghostdriveg1',
-                repo: 'ghost-drive-index',
+                owner: this.owner,
+                repo: this.indexRepo,
                 path: manifestPath,
             });
 
@@ -97,23 +98,32 @@ export class DownloadProcessor {
     }
 
     /**
-     * Fetch chunks in parallel batches
+     * Stream chunks incrementally to avoid buffering entire file
+     * Fetches chunks in batches of parallelism while streaming to decrypt stream
      * @param chunks - Array of chunk references
+     * @param targetStream - Writable stream to pipe chunks into
      * @param parallelism - Number of chunks to fetch concurrently
      */
-    private async fetchChunksParallel(
+    private async streamChunksIncremental(
         chunks: ChunkReference[],
+        targetStream: NodeJS.WritableStream,
         parallelism: number
-    ): Promise<Buffer[]> {
-        const results: Buffer[] = [];
-
+    ): Promise<void> {
         for (let i = 0; i < chunks.length; i += parallelism) {
             const batch = chunks.slice(i, i + parallelism);
-            const batchResults = await Promise.all(batch.map((chunk) => this.fetchChunk(chunk)));
-            results.push(...batchResults);
+            const batchBuffers = await Promise.all(batch.map((chunk) => this.fetchChunk(chunk)));
+
+            // Write each chunk buffer to the target stream
+            for (const buffer of batchBuffers) {
+                if (!targetStream.write(buffer)) {
+                    // Wait for drain event if backpressure occurs
+                    await new Promise((resolve) => targetStream.once('drain', resolve));
+                }
+            }
         }
 
-        return results;
+        // Signal end of input
+        targetStream.end();
     }
 
     /**
@@ -125,7 +135,7 @@ export class DownloadProcessor {
 
         try {
             const { data } = await octokit.git.getBlob({
-                owner: 'ghostdriveg1',
+                owner: this.owner,
                 repo: chunk.shardRepo,
                 file_sha: chunk.blobSHA,
             });

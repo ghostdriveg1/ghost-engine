@@ -12,11 +12,13 @@ const router = express.Router();
  */
 router.get('/download/:fileId', authMiddleware, async (req: Request, res: Response) => {
     try {
-        const { fileId } = req.params;
+        const { fileId } = (req as any).params;
 
         const processor = new DownloadProcessor(
             (req as any).githubToken!,
-            (req as any).encryptionPass!
+            (req as any).encryptionPass!,
+            process.env.GITHUB_OWNER || 'ghostdriveg1',
+            process.env.GITHUB_REPO || 'ghost-drive-index'
         );
 
         await processor.streamDownload(fileId, res);
