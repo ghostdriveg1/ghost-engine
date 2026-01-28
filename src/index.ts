@@ -5,6 +5,7 @@ import { authMiddleware } from './middleware/auth';
 import { IndexManager } from './github/indexManager';
 import { GitClient } from './github/gitClient';
 import uploadRouter from './routes/upload';
+import downloadRouter from './routes/download';
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 app.use(uploadRouter);
+app.use(downloadRouter);
 
 app.get('/health', (req: Request, res: Response) => {
     res.json({
