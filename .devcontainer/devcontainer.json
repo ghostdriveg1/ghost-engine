@@ -1,18 +1,24 @@
 {
-    "name": "Ghost Engine",
-    "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
-    "features": {
-        "ghcr.io/devcontainers/features/git:1": {}
-    },
-    "postCreateCommand": "npm install && npm run build",
-    "postStartCommand": "npm start",
+    "name": "Ghost Engine Development",
+    "image": "mcr.microsoft.com/devcontainers/typescript-node:1-20-bullseye",
     "forwardPorts": [
         3001
     ],
     "portsAttributes": {
         "3001": {
             "label": "Ghost Engine API",
-            "onAutoForward": "notify"
+            "onAutoForward": "notify",
+            "visibility": "public"
+        }
+    },
+    "postCreateCommand": "npm install",
+    "postStartCommand": "npm run build && npm start",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "dbaeumer.vscode-eslint",
+                "esbenp.prettier-vscode"
+            ]
         }
     }
 }
