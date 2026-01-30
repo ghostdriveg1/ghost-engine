@@ -90,10 +90,10 @@ app.post('/test/update-index', authMiddleware, async (req: Request, res: Respons
             size: fileSize || 1024,
             mimeType: 'text/plain',
             uploadedAt: new Date().toISOString(),
-            manifest: {
+            manifest: JSON.stringify({
                 fileId: `test-${Date.now()}`,
                 chunks: [],
-            },
+            }),
             encryptionIV: 'test-iv-hex',
         });
 
@@ -164,7 +164,7 @@ app.post('/test/upload-chunks', authMiddleware, async (req: Request, res: Respon
     }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Ghost Engine running on port ${PORT}`);
     console.log(`Server is accessible at http://0.0.0.0:${PORT}`);
 });
