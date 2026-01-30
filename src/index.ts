@@ -164,6 +164,7 @@ app.post('/test/upload-chunks', authMiddleware, async (req: Request, res: Respon
     }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Ghost Engine running on port ${PORT}`);
+    console.log(`Server is accessible at http://0.0.0.0:${PORT}`);
 });
