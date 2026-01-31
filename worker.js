@@ -11,13 +11,33 @@ const IV_LENGTH = 12;
 const MAX_RETRIES = 5;
 const PARALLEL_DOWNLOADS = 5;
 
-// CORS headers
-const CORS_HEADERS = {
-    'Access-Control-Allow-Origin': 'https://ghost-ui.pages.dev',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-ghost-token, x-ghost-pass',
-    'Access-Control-Max-Age': '86400',
-};
+// Default allowed origins (can be overridden via env.ALLOWED_ORIGINS)
+const DEFAULT_ALLOWED_ORIGINS = [
+    'https://ghost-ui.pages.dev',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+];
+
+// ============================================
+// CORS Helper
+// ============================================
+
+function getCorsHeaders(request, env) {
+    const origin = request.headers.get('Origin');
+    const allowedOrigins = env.ALLOWED_ORIGINS
+        ? env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+        : DEFAULT_ALLOWED_ORIGINS;
+
+    // Check if origin is allowed
+    const isAllowed = allowedOrigins.includes(origin) || allowedOrigins.includes('*');
+
+    return {
+        'Access-Control-Allow-Origin': isAllowed ? origin : allowedOrigins[0],
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, x-ghost-token, x-ghost-pass',
+        'Access-Control-Max-Age': '86400',
+    };
+}
 
 // ============================================
 // Main Worker Entry Point
@@ -25,9 +45,11 @@ const CORS_HEADERS = {
 
 export default {
     async fetch(request, env) {
+        const corsHeaders = getCorsHeaders(request, env);
+
         // Handle CORS preflight
         if (request.method === 'OPTIONS') {
-            return new Response(null, { headers: CORS_HEADERS });
+            return new Response(null, { headers: corsHeaders });
         }
 
         const url = new URL(request.url);
@@ -36,22 +58,22 @@ export default {
         try {
             // Route requests
             if (path === '/health' && request.method === 'GET') {
-                return handleHealth();
+                return handleHealth(corsHeaders);
             }
 
             if (path === '/upload' && request.method === 'POST') {
-                return await handleUpload(request, env);
+                return await handleUpload(request, env, corsHeaders);
             }
 
             if (path.startsWith('/download/') && request.method === 'GET') {
                 const fileId = path.split('/')[2];
-                return await handleDownload(fileId, request, env);
+                return await handleDownload(fileId, request, env, corsHeaders);
             }
 
-            return jsonResponse({ error: 'Not found' }, 404);
+            return jsonResponse({ error: 'Not found' }, corsHeaders, 404);
         } catch (error) {
             console.error('Worker error:', error);
-            return jsonResponse({ error: error.message }, 500);
+            return jsonResponse({ error: error.message }, corsHeaders, 500);
         }
     },
 };
@@ -84,7 +106,8 @@ async function deriveKey(password) {
     );
 }
 
-async function encryptData(data, key) {
+// Encrypt chunk with its own IV
+async function encryptChunk(data, key) {
     const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
     const encrypted = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv },
@@ -92,21 +115,21 @@ async function encryptData(data, key) {
         data
     );
 
-    // Prepend IV to encrypted data
-    const result = new Uint8Array(iv.length + encrypted.byteLength);
-    result.set(iv, 0);
-    result.set(new Uint8Array(encrypted), iv.length);
-    return result;
+    // Return IV and encrypted data separately for manifest storage
+    return {
+        iv: Array.from(iv),
+        ciphertext: new Uint8Array(encrypted),
+    };
 }
 
-async function decryptData(encryptedData, key) {
-    const iv = encryptedData.slice(0, IV_LENGTH);
-    const data = encryptedData.slice(IV_LENGTH);
+// Decrypt chunk with its specific IV
+async function decryptChunk(ciphertext, iv, key) {
+    const ivArray = new Uint8Array(iv);
 
     const decrypted = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv },
+        { name: 'AES-GCM', iv: ivArray },
         key,
-        data
+        ciphertext
     );
 
     return new Uint8Array(decrypted);
@@ -129,8 +152,7 @@ async function fetchIndex(token, owner, repo, password) {
 
     if (!response.ok) {
         if (response.status === 404) {
-            // Index doesn't exist yet, return empty
-            return { data: { files: [] }, sha: null };
+            return { data: { files: [], shardSizes: {} }, sha: null };
         }
         throw new Error(`Failed to fetch index: ${response.statusText}`);
     }
@@ -138,10 +160,23 @@ async function fetchIndex(token, owner, repo, password) {
     const json = await response.json();
     const content = base64Decode(json.content.replace(/\n/g, ''));
 
-    // Decrypt index
+    // Decrypt index (uses single IV for index file only)
     const key = await deriveKey(password);
-    const decrypted = await decryptData(content, key);
+    const iv = content.slice(0, IV_LENGTH);
+    const ciphertext = content.slice(IV_LENGTH);
+
+    const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        ciphertext
+    );
+
     const data = JSON.parse(new TextDecoder().decode(decrypted));
+
+    // Ensure shardSizes exists
+    if (!data.shardSizes) {
+        data.shardSizes = {};
+    }
 
     return { data, sha: json.sha };
 }
@@ -149,8 +184,20 @@ async function fetchIndex(token, owner, repo, password) {
 async function updateIndex(token, owner, repo, password, data, sha) {
     const key = await deriveKey(password);
     const jsonStr = JSON.stringify(data);
-    const encrypted = await encryptData(new TextEncoder().encode(jsonStr), key);
-    const content = base64Encode(encrypted);
+
+    // Encrypt index with its own IV
+    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+    const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        new TextEncoder().encode(jsonStr)
+    );
+
+    // Prepend IV to encrypted data
+    const result = new Uint8Array(iv.length + encrypted.byteLength);
+    result.set(iv, 0);
+    result.set(new Uint8Array(encrypted), iv.length);
+    const content = base64Encode(result);
 
     let retries = 0;
     while (retries < MAX_RETRIES) {
@@ -177,15 +224,15 @@ async function updateIndex(token, owner, repo, password, data, sha) {
         }
 
         if (response.status === 409) {
-            // Conflict - retry with fresh SHA
             retries++;
             const fresh = await fetchIndex(token, owner, repo, password);
 
-            // Merge strategy: combine file arrays
+            // Merge strategy
             const merged = {
                 files: [...fresh.data.files, ...data.files.filter(
                     f => !fresh.data.files.find(existing => existing.id === f.id)
                 )],
+                shardSizes: { ...fresh.data.shardSizes, ...data.shardSizes },
             };
 
             data = merged;
@@ -291,7 +338,7 @@ async function loadManifest(token, owner, repo, fileId) {
 // Shard Management
 // ============================================
 
-async function selectShard(token, owner) {
+async function selectShard(token, owner, shardSizes, chunkSize) {
     // Fetch existing shard repos
     const response = await fetch(
         `https://api.github.com/users/${owner}/repos?per_page=100`,
@@ -308,14 +355,18 @@ async function selectShard(token, owner) {
     }
 
     const repos = await response.json();
-    const shards = repos.filter(r => r.name.startsWith('ghost-drive-shard-'));
+    const shards = repos.filter(r => r.name.startsWith('ghost-drive-shard-'))
+        .sort((a, b) => a.name.localeCompare(b.name));
 
-    // Find shard with available space (simplified - assumes under limit)
-    if (shards.length > 0) {
-        return shards[0].name;
+    // Find shard with available space
+    for (const shard of shards) {
+        const currentSize = shardSizes[shard.name] || 0;
+        if (currentSize + chunkSize < SHARD_SIZE_LIMIT) {
+            return shard.name;
+        }
     }
 
-    // Create new shard
+    // All shards full or no shards exist - create new one
     const shardNumber = String(shards.length + 1).padStart(3, '0');
     const shardName = `ghost-drive-shard-${shardNumber}`;
 
@@ -339,6 +390,9 @@ async function selectShard(token, owner) {
         throw new Error(`Failed to create shard: ${createResponse.statusText}`);
     }
 
+    // Initialize size tracking for new shard
+    shardSizes[shardName] = 0;
+
     return shardName;
 }
 
@@ -352,15 +406,15 @@ function getRotatedToken(env, index = 0) {
 }
 
 // ============================================
-// Upload Handler
+// Upload Handler (Streaming)
 // ============================================
 
-async function handleUpload(request, env) {
+async function handleUpload(request, env, corsHeaders) {
     const token = request.headers.get('x-ghost-token') || getRotatedToken(env);
     const password = request.headers.get('x-ghost-pass');
 
     if (!password) {
-        return jsonResponse({ error: 'Missing x-ghost-pass header' }, 400);
+        return jsonResponse({ error: 'Missing x-ghost-pass header' }, corsHeaders, 400);
     }
 
     const owner = env.GITHUB_OWNER || 'ghostdriveg1';
@@ -371,7 +425,7 @@ async function handleUpload(request, env) {
     const file = formData.get('file');
 
     if (!file) {
-        return jsonResponse({ error: 'No file provided' }, 400);
+        return jsonResponse({ error: 'No file provided' }, corsHeaders, 400);
     }
 
     const fileId = generateUUID();
@@ -382,38 +436,67 @@ async function handleUpload(request, env) {
     // Derive encryption key
     const key = await deriveKey(password);
 
-    // Process file: compress -> encrypt -> chunk -> upload
+    // Fetch current index for shard tracking
+    const { data: indexData, sha: indexSha } = await fetchIndex(token, owner, indexRepo, password);
+    const shardSizes = indexData.shardSizes || {};
+
+    // Stream file: chunk raw data -> compress each chunk -> encrypt each chunk -> upload
     const chunks = [];
-    const buffer = await file.arrayBuffer();
+    const stream = file.stream();
+    const reader = stream.getReader();
 
-    // Compress
-    const compressed = await compressData(new Uint8Array(buffer));
-
-    // Encrypt
-    const encrypted = await encryptData(compressed, key);
-    const iv = encrypted.slice(0, IV_LENGTH);
-
-    // Split into chunks
-    let offset = 0;
+    let buffer = new Uint8Array(0);
     let chunkIndex = 0;
+    let done = false;
 
-    while (offset < encrypted.length) {
-        const chunkData = encrypted.slice(offset, offset + CHUNK_SIZE);
-        const shard = await selectShard(token, owner);
-        const chunkPath = `chunks/${fileId}/${chunkIndex}.enc`;
+    while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        done = streamDone;
 
-        const blobSha = await uploadChunk(token, owner, shard, chunkPath, chunkData);
+        if (value) {
+            // Append to buffer
+            const newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+        }
 
-        chunks.push({
-            id: `${fileId}-${chunkIndex}`,
-            position: chunkIndex,
-            size: chunkData.length,
-            blobSha,
-            shardRepo: shard,
-        });
+        // Process chunks when buffer is large enough or stream is done
+        while (buffer.length >= CHUNK_SIZE || (done && buffer.length > 0)) {
+            const chunkSize = Math.min(CHUNK_SIZE, buffer.length);
+            const chunkData = buffer.slice(0, chunkSize);
+            buffer = buffer.slice(chunkSize);
 
-        offset += CHUNK_SIZE;
-        chunkIndex++;
+            // Compress this chunk independently
+            const compressed = await compressData(chunkData);
+
+            // Encrypt with its own IV
+            const { iv, ciphertext } = await encryptChunk(compressed, key);
+
+            // Select shard based on current sizes
+            const shard = await selectShard(token, owner, shardSizes, ciphertext.length);
+            const chunkPath = `chunks/${fileId}/${chunkIndex}.enc`;
+
+            // Upload chunk
+            const blobSha = await uploadChunk(token, owner, shard, chunkPath, ciphertext);
+
+            // Track shard size
+            shardSizes[shard] = (shardSizes[shard] || 0) + ciphertext.length;
+
+            // Store chunk metadata with IV
+            chunks.push({
+                id: `${fileId}-${chunkIndex}`,
+                position: chunkIndex,
+                size: ciphertext.length,
+                blobSha,
+                shardRepo: shard,
+                iv, // Store IV for this specific chunk
+            });
+
+            chunkIndex++;
+
+            if (buffer.length < CHUNK_SIZE) break;
+        }
     }
 
     // Write manifest
@@ -424,9 +507,7 @@ async function handleUpload(request, env) {
     await writeManifest(token, owner, indexRepo, fileId, manifest);
 
     // Update index
-    const { data, sha } = await fetchIndex(token, owner, indexRepo, password);
-
-    data.files.push({
+    indexData.files.push({
         id: fileId,
         name: fileName,
         path: `/${fileName}`,
@@ -434,39 +515,40 @@ async function handleUpload(request, env) {
         mimeType,
         uploadedAt: new Date().toISOString(),
         manifest: JSON.stringify(manifest),
-        encryptionIV: base64Encode(iv),
     });
 
-    await updateIndex(token, owner, indexRepo, password, data, sha);
+    indexData.shardSizes = shardSizes;
+
+    await updateIndex(token, owner, indexRepo, password, indexData, indexSha);
 
     return jsonResponse({
         success: true,
         fileId,
         size: fileSize,
-    });
+    }, corsHeaders);
 }
 
 // ============================================
-// Download Handler
+// Download Handler (Streaming)
 // ============================================
 
-async function handleDownload(fileId, request, env) {
+async function handleDownload(fileId, request, env, corsHeaders) {
     const token = request.headers.get('x-ghost-token') || getRotatedToken(env);
     const password = request.headers.get('x-ghost-pass');
 
     if (!password) {
-        return jsonResponse({ error: 'Missing x-ghost-pass header' }, 400);
+        return jsonResponse({ error: 'Missing x-ghost-pass header' }, corsHeaders, 400);
     }
 
     const owner = env.GITHUB_OWNER || 'ghostdriveg1';
     const indexRepo = env.GITHUB_INDEX_REPO || 'ghost-drive-index';
 
-    // Fetch index to find file metadata
+    // Fetch index
     const { data } = await fetchIndex(token, owner, indexRepo, password);
     const file = data.files.find(f => f.id === fileId);
 
     if (!file) {
-        return jsonResponse({ error: 'File not found' }, 404);
+        return jsonResponse({ error: 'File not found' }, corsHeaders, 404);
     }
 
     // Load manifest
@@ -475,11 +557,10 @@ async function handleDownload(fileId, request, env) {
     // Derive decryption key
     const key = await deriveKey(password);
 
-    // Stream chunks incrementally
+    // Stream chunks: download -> decrypt with chunk IV -> decompress -> output
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
 
-    // Download and decrypt chunks in parallel batches
     (async () => {
         try {
             for (let i = 0; i < manifest.chunks.length; i += PARALLEL_DOWNLOADS) {
@@ -491,11 +572,15 @@ async function handleDownload(fileId, request, env) {
 
                 const chunkBuffers = await Promise.all(chunkPromises);
 
-                for (const chunkBuffer of chunkBuffers) {
-                    // Decrypt chunk
-                    const decrypted = await decryptData(chunkBuffer, key);
+                // Process each chunk in order with its specific IV
+                for (let j = 0; j < chunkBuffers.length; j++) {
+                    const chunkBuffer = chunkBuffers[j];
+                    const chunkMeta = batch[j];
 
-                    // Decompress
+                    // Decrypt with this chunk's IV
+                    const decrypted = await decryptChunk(chunkBuffer, chunkMeta.iv, key);
+
+                    // Decompress this chunk
                     const decompressed = await decompressData(decrypted);
 
                     await writer.write(decompressed);
@@ -510,7 +595,7 @@ async function handleDownload(fileId, request, env) {
 
     return new Response(readable, {
         headers: {
-            ...CORS_HEADERS,
+            ...corsHeaders,
             'Content-Type': file.mimeType,
             'Content-Disposition': `attachment; filename="${file.name}"`,
         },
@@ -521,24 +606,24 @@ async function handleDownload(fileId, request, env) {
 // Health Check
 // ============================================
 
-function handleHealth() {
+function handleHealth(corsHeaders) {
     return jsonResponse({
         status: 'ok',
         platform: 'cloudflare-workers',
         timestamp: new Date().toISOString(),
         version: '1.0.0',
-    });
+    }, corsHeaders);
 }
 
 // ============================================
 // Utility Functions
 // ============================================
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(data, corsHeaders, status = 200) {
     return new Response(JSON.stringify(data), {
         status,
         headers: {
-            ...CORS_HEADERS,
+            ...corsHeaders,
             'Content-Type': 'application/json',
         },
     });
