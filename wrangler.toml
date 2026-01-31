@@ -1,0 +1,12 @@
+name = "ghost-engine"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "ghost-engine"
+route = ""
+
+# Environment variables to set via wrangler secret:
+# - GITHUB_TOKEN: GitHub Personal Access Token (or comma-separated tokens for rotation)
+# - GITHUB_OWNER: GitHub username (optional, can be hardcoded)
+# - GITHUB_INDEX_REPO: Index repository name (default: ghost-drive-index)
